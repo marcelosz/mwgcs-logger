@@ -12,7 +12,7 @@ import sys, logging, argparse, textwrap
 import time
 import requests
 from requests.auth import HTTPBasicAuth
-import StringIO
+import io
 import cgi
 import csv
 import re
@@ -37,16 +37,17 @@ def create_arg_parser():
     """
 
     epilog = """\
-       TODO *** Descriptive text ***
+    
     """
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog=textwrap.dedent(epilog))
     parser.add_argument("-c", "--configfile", help="Configuration file. Default is mwgcs-logger.conf", default="mwgcs-logger.conf")
     parser.add_argument("-l", "--loglevel", help="Logging level (DEBUG, INFO or ERROR). Default is INFO.", default="INFO")
-    parser.add_argument("-r", "--resultfilter", help="Collect logs with specified result. Result can be OBSERVED or DENIED. Default is to leave this filter blank.", default=None)    
+    parser.add_argument("-o", "--outputfile", help="Output logs as CSV into specified file. WARNING: previous file with the same name will be overwritten.", default="mwgcs-logger-output.csv", required=True)
+    parser.add_argument("-r", "--resultfilter", help="Collect logs with specified 'result' field value. Result can be OBSERVED or DENIED. Default is to leave this filter blank.", default=None)
     parser.add_argument("-t", "--timestamp", help="Timestamp (in Epoch) to use as the \"requestTimestampTo\" as the API filter. That is, the logs collected will be no newer than this parameter. Default is current time (\"Now\").", default=0)
-    parser.add_argument("-u", "--userfilter", help="Filter logs related to specific user. Needs to match the authentication scheme in use (e-mail, domain\user or IP address).", default=None)
+    parser.add_argument("-u", "--userfilter", help="Filter logs related to specific 'username' field value. Needs to match the authentication scheme in use (e-mail, domain \ user or IP address).", default=None)
     parser.add_argument("-w", "--window", help="Time window (in seconds) to collect logs. This will be used to build \"requestTimestampFrom\". That is, how far back from the \"timestamp\" parameter the logs should be. Default is 60 seconds.", default=60)
     return parser
 
@@ -93,16 +94,16 @@ def main(argv):
     requestTimestampFrom = requestTimestampTo - int(args.window)
 
     # build the filter, starting by the timestamps
-    mwgcsFilter = "filter.requestTimestampFrom=" + str(requestTimestampFrom) + "&amp;filter.requestTimestampTo=" + str(requestTimestampTo)
+    mwgcsFilter = "filter.requestTimestampFrom=" + str(requestTimestampFrom) + "&filter.requestTimestampTo=" + str(requestTimestampTo)    
     enabledFilters = 0
     if args.userfilter:
         enabledFilters += 1
         escapedUserFilter = cgi.escape("\"" + args.userfilter + "\"")
-        mwgcsFilter += "&amp;filter.userName=" + str(escapedUserFilter)
+        mwgcsFilter += "&filter.userName=" + str(escapedUserFilter)
     if args.resultfilter:
         enabledFilters += 1        
-        mwgcsFilter += "&amp;filter.result=" + str(args.resultfilter)
-    mwgcsFilter += "&amp;order.0.requestTimestamp=asc"   
+        mwgcsFilter += "&filter.result=" + str(args.resultfilter)        
+    mwgcsFilter += "&order.0.requestTimestamp=asc"    
     mwgcsURL = 'https://' + conf_util.cfg['MWGCS']['Host'] + '/mwg/api/reporting/forensic/' + conf_util.cfg['MWGCS']['CustomerID'] + "?" + mwgcsFilter
     logger.debug("URL:" + mwgcsURL)
 
@@ -111,16 +112,16 @@ def main(argv):
         requestHeaders = {'user-agent': 'mwgcs-logger/0.0.0.0', 'Accept': 'text/csv', 'x-mwg-api-version': '5'}
         logger.info("Connecting to MWGCS to collect logs...")
         r = requests.get(mwgcsURL, headers=requestHeaders, auth=HTTPBasicAuth(conf_util.cfg['MWGCS']['UserID'], conf_util.cfg['MWGCS']['Password']), timeout=float(conf_util.cfg['MWGCS']['ConnectionTimeout']))
-
-        # put response into variable
-        output = StringIO.StringIO(r.text.encode('utf-8'))
- 
         logger.debug("Request status code: " + str(r.status_code))
         if r.status_code != 200:
             logger.debug("Response code: " + str(r.text))
             raise ValueError('Invalid response status: ' + str(r.status_code))
-
-        responseLines = output.read().splitlines()
+        r.encode = 'utf-8'
+        req_output = io.StringIO()
+        nWriteLen = req_output.write(r.text)
+        logger.debug("Written " + str(nWriteLen) + " bytes to in-memory stream.")        
+        req_output.seek(0)
+        responseLines = req_output.read().splitlines()
         # if response is valid but has only 1 line, then it's just a header and should be ignored.
         nLines = responseLines.__len__()
         if nLines <= 1:
@@ -133,27 +134,22 @@ def main(argv):
             logger.error("Invalid first line from response: " + responseLines[0])
 
         # print the collected logs - for some reason there are 2 empty lines, plus the header (that's why the number 3 here)
-        logger.info("Total number of log entries collected: " + str(nLines - 3))
-        logger.info("Now printing logs that match filter parameters (if any)...")
-        logger.info("Header: " + csvHeader)
-        #print '"request_timestamp" "username" "source_ip" "http_action" "requested_host" "requested_path" "category" "reputation" "last_rule" "result" "block_reason" "process_name" "destination_ip" "destination_port"'
+        if enabledFilters:
+            logger.info("Total number of collected log entries that match field filter(s) ('username = " + str(args.userfilter) + "' and/or 'result = "+ str(args.resultfilter) +"'): " + str(nLines - 3))
+        else:
+            logger.info("Total number of collected log entries (no filter applied): " + str(nLines - 3))
 
-        csvDict = csv.DictReader(responseLines)
-        logLines = responseLines[1:]
-        nRow = 0
-        for row, line in zip(csvDict, logLines):
-            filterMatch = 0
-            if args.userfilter:
-                if (re.search(args.userfilter, row['username'])):
-                    filterMatch += 1
-            if args.resultfilter:
-                if (re.search(args.resultfilter, row['result'])):
-                    filterMatch += 1
-            if not enabledFilters or enabledFilters == filterMatch :
-                nRow += 1
-                print line
-                #print str(nRow) + ": " + row['request_timestamp'], row ['username'], row['source_ip'], row['http_action'], row['requested_host'], row['requested_path'], \
-                #row['category'], row['reputation'], row['last_rule'], row['result'], row['block_reason'], row['process_name'], row ['destination_ip'], row['destination_port']
+        # TODO - use this if we need to manipulate the CSV in the future
+        #csvDict = csv.DictReader(responseLines)
+
+        # write output CSV file
+        logger.info("Writing collected logs to file '" + args.outputfile + "'...")
+        with open(args.outputfile, 'w') as csvfile:
+            csvfile.write(csvHeader + "\n")
+            for line in responseLines[1:]:
+                # exclude empty lines
+                if not re.search("^$", line):
+                    csvfile.write(line.encode('utf-8') + "\n")
            
     except Exception as e:
         logger.error(str(e))
