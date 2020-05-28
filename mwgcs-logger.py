@@ -16,6 +16,7 @@ import io
 import cgi
 import csv
 import re
+import subprocess
 
 # Enable logging for the script itself
 log_formatter = logging.Formatter('%(asctime)s mwgcs-logger (%(name)s) %(levelname)s: %(message)s')
@@ -42,6 +43,7 @@ def create_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog=textwrap.dedent(epilog))
+    parser.add_argument("-a", "--analyzerapp", help="Full path of an application executable that will be called to analyze/view the CSV file after it is written. By default, no application is called.", default=None)
     parser.add_argument("-c", "--configfile", help="Configuration file. Default is mwgcs-logger.conf", default="mwgcs-logger.conf")
     parser.add_argument("-l", "--loglevel", help="Logging level (DEBUG, INFO or ERROR). Default is INFO.", default="INFO")
     parser.add_argument("-o", "--outputfile", help="Output logs as CSV into specified file. WARNING: previous file with the same name will be overwritten.", default="mwgcs-logger-output.csv", required=True)
@@ -113,9 +115,11 @@ def main(argv):
         logger.info("Connecting to MWGCS to collect logs...")
         r = requests.get(mwgcsURL, headers=requestHeaders, auth=HTTPBasicAuth(conf_util.cfg['MWGCS']['UserID'], conf_util.cfg['MWGCS']['Password']), timeout=float(conf_util.cfg['MWGCS']['ConnectionTimeout']))
         logger.debug("Request status code: " + str(r.status_code))
+        
         if r.status_code != 200:
             logger.debug("Response code: " + str(r.text))
             raise ValueError('Invalid response status: ' + str(r.status_code))
+        
         r.encode = 'utf-8'
         req_output = io.StringIO()
         nWriteLen = req_output.write(r.text)
@@ -124,6 +128,7 @@ def main(argv):
         responseLines = req_output.read().splitlines()
         # if response is valid but has only 1 line, then it's just a header and should be ignored.
         nLines = responseLines.__len__()
+        
         if nLines <= 1:
             logger.error("No log collected!")
             exit(1)
@@ -131,7 +136,7 @@ def main(argv):
         # header for API 5 responses
         csvHeader = '"user_id","username","source_ip","http_action","server_to_client_bytes","client_to_server_bytes","requested_host","requested_path","result","virus","request_timestamp_epoch","request_timestamp","uri_scheme","category","media_type","application_type","reputation","last_rule","http_status_code","client_ip","location","block_reason","user_agent_product","user_agent_version","user_agent_comment","process_name","destination_ip","destination_port"'
         if responseLines[0] != csvHeader:
-            logger.error("Invalid first line from response: " + responseLines[0])
+            raise ValueError('Invalid first line from response: ' + responseLines[0])            
 
         # print the collected logs - for some reason there are 2 empty lines, plus the header (that's why the number 3 here)
         if enabledFilters:
@@ -149,7 +154,12 @@ def main(argv):
             for line in responseLines[1:]:
                 # exclude empty lines
                 if not re.search("^$", line):
-                    csvfile.write(line.encode('utf-8') + "\n")
+                    csvfile.write(ascii(line) + "\n")
+
+        # auto open application to read the CSV file, if arg enabled
+        if args.analyzerapp:
+            logger.info("Calling '" + args.analyzerapp + "' to open the CSV file...")            
+            subprocess.call([args.analyzerapp, args.outputfile])
            
     except Exception as e:
         logger.error(str(e))
