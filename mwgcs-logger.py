@@ -100,7 +100,8 @@ def main(argv):
     enabledFilters = 0
     if args.userfilter:
         enabledFilters += 1
-        escapedUserFilter = cgi.escape("\"" + args.userfilter + "\"")
+        #escapedUserFilter = cgi.escape("\"" + args.userfilter + "\"")
+        escapedUserFilter = args.userfilter        
         mwgcsFilter += "&filter.userName=" + str(escapedUserFilter)
     if args.resultfilter:
         enabledFilters += 1        
